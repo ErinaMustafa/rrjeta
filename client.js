@@ -7,7 +7,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-const SERVER = process.argv[2] || '127.0.0.1';
+const SERVER = process.argv[2] || '10.180.76.51';
 const PORT = parseInt(process.argv[3],10) || 9000;
 const NAME = process.argv[4] || 'Anon';
 const ROLE = (process.argv[5] || 'read').toLowerCase();
