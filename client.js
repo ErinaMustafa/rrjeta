@@ -1,5 +1,5 @@
 // =============================
-// KLIENTI TCP në Node.js (Final)
+// KLIENTI TCP në Node.js (me prompt për ADMIN password)
 // =============================
 
 const net = require('net');
@@ -17,7 +17,7 @@ const rl = readline.createInterface({
 
 klient.connect(SERVER_PORT, SERVER_IP, () => {
     console.log('✅ Lidhja me server u kry me sukses!');
-    console.log('Shkruaj "ADMIN" për privilegje të plota, ose mesazh normal:');
+    console.log('Shkruaj "ADMIN" për të hyrë si admin (do të kërkohet fjalëkalimi), ose shkruaj mesazh normal:');
 });
 
 klient.on('data', (data) => {
@@ -26,12 +26,23 @@ klient.on('data', (data) => {
 
 klient.on('close', () => {
     console.log('🔌 Lidhja me serverin u mbyll.');
+    process.exit(0);
 });
 
 klient.on('error', (err) => {
     console.log('⚠️ Gabim: ' + err.message);
 });
 
+// Kur përdoruesi shtyp line
 rl.on('line', (input) => {
-    klient.write(input);
+    const trimmed = input.trim();
+    if (trimmed.toUpperCase() === 'ADMIN') {
+        // kërko fjalëkalimin në mënyrë interaktive
+        rl.question('Fjalëkalimi i adminit: ', (pwd) => {
+            klient.write(`ADMIN ${pwd}`);
+        });
+    } else {
+        // mund të lejojmë edhe formatin ADMIN <pwd> direkt
+        klient.write(input);
+    }
 });

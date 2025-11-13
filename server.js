@@ -1,5 +1,5 @@
 // =============================
-// SERVERI TCP në Node.js (Final)
+// SERVERI TCP në Node.js (me ADMIN password)
 // =============================
 
 const net = require('net');
@@ -10,20 +10,20 @@ const PORTI = 4000;
 const IP_ADRESA = '0.0.0.0';
 const MAKS_KLIENTE = 4;
 
-// Sigurohu që folderi ekziston
+// <-- Vendos fjalëkalimin e adminit këtu (ndrysho para dorëzimit)
+/** Për student: ruajtja e fjalëkalimit në plaintext është e lejueshme për këtë projekt.
+    Në prodhim duhet përdorur hash + konfigurim të sigurt. */
+const ADMIN_PASSWORD = 'letmein';
+
 if (!fs.existsSync('./server_files')) fs.mkdirSync('./server_files');
 
-// Objekt për klientët
 let klientet = [];
-
-// Statistika
 let statistika = {
     lidhjeAktive: 0,
     mesazhePerKlient: {},
     trafikuTotalBytes: 0,
 };
 
-// Ruajtja periodike e statistikave në file
 setInterval(() => {
     let statsData = `📊 ${new Date().toLocaleString()}\n` +
         `Lidhje aktive: ${statistika.lidhjeAktive}\n` +
@@ -32,7 +32,6 @@ setInterval(() => {
     fs.writeFileSync('server_stats.txt', statsData);
 }, 10000);
 
-// Krijo serverin
 const server = net.createServer((socket) => {
 
     if (klientet.length >= MAKS_KLIENTE) {
@@ -43,13 +42,13 @@ const server = net.createServer((socket) => {
 
     const adresaKlientit = `${socket.remoteAddress}:${socket.remotePort}`;
     socket.isAdmin = false;
+    socket.adminAttempts = 0; // numri i tentativave për fjalëkalim
     klientet.push(socket);
     statistika.lidhjeAktive++;
     statistika.mesazhePerKlient[adresaKlientit] = 0;
 
     console.log(`📶 Klient i ri u lidh: ${adresaKlientit}`);
 
-    // Timeout për klientët joaktivë (30 sekonda)
     socket.setTimeout(30000);
     socket.on('timeout', () => {
         socket.write('⏱️ Nuk u dërgua asnjë mesazh për 30 sekonda, lidhja po mbyllet.\n');
@@ -64,14 +63,32 @@ const server = net.createServer((socket) => {
         console.log(`💬 [${adresaKlientit}]: ${mesazhi}`);
         fs.appendFileSync('server_log.txt', `[${new Date().toISOString()}] ${adresaKlientit}: ${mesazhi}\n`);
 
-        // Identifikimi si ADMIN
-        if (mesazhi === 'ADMIN') {
-            socket.isAdmin = true;
-            socket.write('✅ Identifikim si ADMIN u kry me sukses.\n');
+        // Kontroll për komandën ADMIN me fjalëkalim:
+        // Miraton formatin: "ADMIN <password>"
+        if (mesazhi.toUpperCase().startsWith('ADMIN')) {
+            const parts = mesazhi.split(' ');
+            if (parts.length < 2) {
+                socket.write('🔒 Përdor: ADMIN <password>\n');
+                return;
+            }
+            const provided = parts.slice(1).join(' ');
+            socket.adminAttempts++;
+            if (provided === ADMIN_PASSWORD) {
+                socket.isAdmin = true;
+                socket.write('✅ Identifikim si ADMIN u kry me sukses.\n');
+                console.log(`🔐 Klienti ${adresaKlientit} u bë ADMIN`);
+            } else {
+                socket.write('❌ Fjalëkalim i pasaktë.\n');
+                // Opsional: blloko pasi tre tentativat dështojnë
+                if (socket.adminAttempts >= 3) {
+                    socket.write('🚫 Shumë tentativë te pasakta. Lidhja po mbyllet.\n');
+                    socket.destroy();
+                }
+            }
             return;
         }
 
-        // Komanda STATS
+        // STATS
         if (mesazhi === 'STATS') {
             let info = `📊 Statistika:\nLidhje aktive: ${statistika.lidhjeAktive}\nKlientë aktivë:\n`;
             for (let k of klientet) {
@@ -83,14 +100,13 @@ const server = net.createServer((socket) => {
             return;
         }
 
-        // Kufizim komandash për user normal
         const adminCommands = ['/list', '/read', '/delete', '/upload', '/download', '/search', '/info'];
         if (adminCommands.some(cmd => mesazhi.startsWith(cmd)) && !socket.isAdmin) {
-            socket.write('🚫 Nuk ke privilegje të mjaftueshme për këtë komandë.\n');
+            socket.write('🚫 Nuk ke privilegje të mjaftueshme për këtë komandë. Përdor ADMIN <password> për t\'u identifikuar.\n');
             return;
         }
 
-        // Komanda për listim
+        // Komandat ekzistuese: /list, /read, /delete, /info, /upload, /search
         if (mesazhi.startsWith('/list')) {
             const files = fs.readdirSync('./server_files');
             socket.write('📁 File në server:\n' + files.join('\n') + '\n');
@@ -138,13 +154,11 @@ const server = net.createServer((socket) => {
             socket.write('👋 Serveri të përshëndet!\n');
 
         } else {
-            // Përgjigje normale + admin më e shpejtë
             if (socket.isAdmin) socket.write('✅ Mesazhi u pranua nga serveri. ⏩ (Admin)\n');
             else setTimeout(() => socket.write('✅ Mesazhi u pranua nga serveri.\n'), 1000);
         }
     });
 
-    // Kur klienti shkëputet
     socket.on('end', () => {
         console.log(`❌ Klienti u shkëput: ${adresaKlientit}`);
         klientet = klientet.filter((k) => k !== socket);
