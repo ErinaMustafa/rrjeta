@@ -40,12 +40,28 @@ const server = net.createServer((socket) => {
     statistika.mesazhePerKlient[adresaKlientit] = 0;
 
     console.log(`📶 Klient i ri u lidh: ${adresaKlientit}`);
+    // Vendos timeout për mosaktivitet
+let kohaFunditMesazhit = Date.now();
+
+// Kontrollo çdo 5 sekonda nëse klienti është inaktiv
+const kontrolloInaktivitetin = setInterval(() => {
+    const tani = Date.now();
+    const diferenca = (tani - kohaFunditMesazhit) / 1000; // në sekonda
+
+    if (diferenca > 20) { // nëse s’ka dërgu asgjë për 20 sekonda
+        socket.write('⏰ Nuk ke dërguar mesazhe për 20 sekonda. Lidhja po mbyllet.\n');
+        console.log(`🕒 Klienti ${adresaKlientit} u mbyll për mosaktivitet.`);
+        socket.end();
+        clearInterval(kontrolloInaktivitetin);
+    }
+}, 5000);
 
     // Kur serveri pranon të dhëna nga klienti
     socket.on('data', (data) => {
         const mesazhi = data.toString().trim();
         statistika.trafikuTotalBytes += Buffer.byteLength(data);
         statistika.mesazhePerKlient[adresaKlientit]++;
+        kohaFunditMesazhit = Date.now();
 
         console.log(`💬 [${adresaKlientit}]: ${mesazhi}`);
 
@@ -116,12 +132,7 @@ const server = net.createServer((socket) => {
         }
     });
 
-    // Nëse klienti shkëputet
-    socket.on('end', () => {
-        console.log(`❌ Klienti u shkëput: ${adresaKlientit}`);
-        klientet = klientet.filter((k) => k !== socket);
-        statistika.lidhjeAktive--;
-    });
+    
 
     // Në rast gabimi
     socket.on('error', (err) => {
