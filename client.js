@@ -6,7 +6,7 @@ const net = require('net');
 const readline = require('readline');
 
 // Vendos IP dhe portin e serverit
-const SERVER_IP = '192.168.1.100'; // ndrysho me IP-në reale të serverit
+const SERVER_IP = '0.0.0.0'; // ndrysho me IP-në reale të serverit
 const SERVER_PORT = 4000;
 
 // Krijo socket-in për lidhje
