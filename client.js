@@ -15,7 +15,7 @@ const ROLE = (process.argv[5] || 'read').toLowerCase();
 const socket = new net.Socket();
 
 socket.connect(PORT, SERVER, () => {
-  console.log('Connected to server', SERVER+':'+PORT);
+  console.log('Connected to server', SERVER+'   :    '+PORT);
   // introduce
   socket.write(`HELLO ${NAME} ${ROLE}\n`);
   showPrompt();

@@ -92,7 +92,7 @@ function acceptConnection(socket) {
     role: 'read', // default role; client can request admin on connect
     lastActive: Date.now()
   };
-  sendToSocket(socket, 'WELCOME Please send "HELLO <name> <role>" e.g. HELLO Erisa admin');
+  sendToSocket(socket, 'WELCOME ');
   writeLog(`[${new Date().toISOString()}] CONNECT ${id}`);
   console.log(`Accepted: ${id}. Active: ${Object.keys(clients).length}`);
   setupSocketHandlers(socket);
