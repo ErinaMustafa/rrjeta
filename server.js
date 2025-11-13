@@ -1,169 +1,303 @@
+// server.js
+// Usage: node server.js [HOST] [PORT] [CONNECTION_LIMIT]
+// Example: node server.js 0.0.0.0 9000 6
+
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 
-const PORT = 6000;
-const HOST = '0.0.0.0'; // i lejon lidhje nga çdo IP në rrjet
-const MAX_CONNECTIONS = 5;
-const USER_TIMEOUT = 30000; // 30 sek për user
-const ADMIN_TIMEOUT = 10000; // 10 sek për admin
-
-let connections = new Map();
-let totalTraffic = 0;
-let messageLog = [];
+const HOST = process.argv[2] || '0.0.0.0';
+const PORT = parseInt(process.argv[3],10) || 9000;
+const CONNECTION_LIMIT = parseInt(process.argv[4],10) || 6;
+const INACTIVITY_MS = 2 * 60 * 1000; // 2 minutes inactivity timeout (mund ta ndryshoni)
 const STATS_FILE = 'server_stats.txt';
-const SERVER_FILES = './server_files';
-if (!fs.existsSync(SERVER_FILES)) fs.mkdirSync(SERVER_FILES);
+const LOG_FILE = 'server_logs.txt';
+const FILES_DIR = path.join(__dirname,'files');
 
-const server = net.createServer((socket) => {
-  if (connections.size >= MAX_CONNECTIONS) {
-    socket.write('🚫 Server is full, try again later.\n');
-    socket.end();
-    return;
-  }
+// Siguro folderin files ekziston
+if (!fs.existsSync(FILES_DIR)) fs.mkdirSync(FILES_DIR);
 
-  const clientId = `${socket.remoteAddress}:${socket.remotePort}`;
-  const role = connections.size === 0 ? 'admin' : 'user';
-  connections.set(socket, { id: clientId, role, messages: 0, lastActive: Date.now() });
+let clients = {}; // clientId -> { socket, ip, bytesIn, bytesOut, messages, role, lastActive }
+let queue = []; // sockets në pritje
+let totalBytesIn = 0;
+let totalBytesOut = 0;
 
-  console.log(`✅ New connection: ${clientId} (${role})`);
-  socket.write(`Connected to server as ${role}\n`);
-
-  socket.on('data', async (data) => {
-    const client = connections.get(socket);
-    if (!client) return;
-
-    totalTraffic += data.length;
-    client.lastActive = Date.now();
-
-    const msg = data.toString().trim();
-    client.messages++;
-    messageLog.push(`[${new Date().toISOString()}] ${client.id}: ${msg}`);
-    console.log(`💬 [${client.id}] -> ${msg}`);
-
-    if (client.role === 'admin' && msg.startsWith('/')) {
-      await handleAdminCommand(socket, msg);
-    } else if (msg.toUpperCase() === 'STATS') {
-      sendStats(socket);
-    } else {
-      socket.write(`Server received: ${msg}\n`);
-    }
-
-    updateStatsFile();
-  });
-
-  socket.on('end', () => {
-    console.log(`❌ ${clientId} disconnected`);
-    connections.delete(socket);
-    updateStatsFile();
-  });
-
-  socket.on('error', () => {
-    connections.delete(socket);
-    updateStatsFile();
-  });
-
-  const interval = setInterval(() => {
-    const client = connections.get(socket);
-    if (!client) {
-      clearInterval(interval);
-      return;
-    }
-    const timeout = client.role === 'admin' ? ADMIN_TIMEOUT : USER_TIMEOUT;
-    if (Date.now() - client.lastActive > timeout) {
-      socket.write('⏰ Timeout, connection closed due to inactivity.\n');
-      socket.end();
-      connections.delete(socket);
-      clearInterval(interval);
-      updateStatsFile();
-    }
-  }, 5000);
-});
-
-async function handleAdminCommand(socket, msg) {
-  const args = msg.split(' ');
-  const cmd = args[0].toLowerCase();
-
-  switch (cmd) {
-    case '/list':
-      fs.readdir(SERVER_FILES, (err, files) => {
-        if (err) return socket.write('Error reading directory\n');
-        socket.write('Files:\n' + files.join('\n') + '\n');
-      });
-      break;
-
-    case '/read':
-      if (!args[1]) return socket.write('Usage: /read <filename>\n');
-      const readPath = path.join(SERVER_FILES, args[1]);
-      if (fs.existsSync(readPath)) {
-        const content = fs.readFileSync(readPath, 'utf8');
-        socket.write(`\n${args[1]}:\n${content}\n`);
-      } else socket.write('File not found.\n');
-      break;
-
-    case '/delete':
-      if (!args[1]) return socket.write('Usage: /delete <filename>\n');
-      const delPath = path.join(SERVER_FILES, args[1]);
-      if (fs.existsSync(delPath)) {
-        fs.unlinkSync(delPath);
-        socket.write('File deleted.\n');
-      } else socket.write('File not found.\n');
-      break;
-
-    case '/info':
-      if (!args[1]) return socket.write('Usage: /info <filename>\n');
-      const infoPath = path.join(SERVER_FILES, args[1]);
-      if (fs.existsSync(infoPath)) {
-        const stats = fs.statSync(infoPath);
-        socket.write(
-          `Info for ${args[1]}:\nSize: ${stats.size} bytes\nCreated: ${stats.birthtime}\nModified: ${stats.mtime}\n`
-        );
-      } else socket.write('File not found.\n');
-      break;
-
-    case '/search':
-      if (!args[1]) return socket.write('Usage: /search <keyword>\n');
-      fs.readdir(SERVER_FILES, (err, files) => {
-        if (err) return socket.write('Error reading directory\n');
-        const matches = files.filter(f => f.includes(args[1]));
-        socket.write('Found:\n' + (matches.join('\n') || 'No matches') + '\n');
-      });
-      break;
-
-    default:
-      socket.write('Unknown command.\n');
-  }
+// ndihmëse
+function clientIdForSocket(s) {
+  return `${s.remoteAddress}:${s.remotePort}`;
 }
 
-function sendStats(socket) {
-  const stats = `
-===== SERVER STATS =====
-Active connections: ${connections.size}
-Clients:
-${Array.from(connections.values())
-  .map(c => ` - ${c.id} (${c.role}) [${c.messages} msgs]`)
-  .join('\n')}
-Total traffic: ${totalTraffic} bytes
-========================
-`;
-  socket.write(stats + '\n');
+function writeLog(line) {
+  fs.appendFileSync(LOG_FILE, line + '\n');
 }
 
 function updateStatsFile() {
-  const content = `
-===== SERVER STATS =====
-Time: ${new Date().toISOString()}
-Active connections: ${connections.size}
-Total traffic: ${totalTraffic} bytes
-Clients:
-${Array.from(connections.values())
-  .map(c => ` - ${c.id} (${c.role}) [${c.messages} msgs]`)
-  .join('\n')}
-========================
-`;
-  fs.writeFileSync(STATS_FILE, content);
+  const active = Object.keys(clients).length;
+  const ips = Object.values(clients).map(c => c.ip);
+  const perClient = Object.entries(clients).map(([id,c])=>{
+    return `${id} msgs=${c.messages} in=${c.bytesIn} out=${c.bytesOut}`;
+  }).join('\n');
+  const txt = [
+    `TIME: ${new Date().toISOString()}`,
+    `Active connections: ${active}`,
+    `Active IPs: ${ips.join(',')}`,
+    `Total bytes in: ${totalBytesIn}`,
+    `Total bytes out: ${totalBytesOut}`,
+    `Per-client:`,
+    perClient
+  ].join('\n');
+  fs.writeFileSync(STATS_FILE, txt);
 }
 
+// STATS command via server terminal
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+rl.on('line', (input)=> {
+  if (input.trim().toUpperCase() === 'STATS') {
+    console.log('----- SERVER STATS -----');
+    console.log(fs.readFileSync(STATS_FILE,'utf8'));
+  } else if (input.trim().toUpperCase() === 'EXIT') {
+    console.log('Shutting down server...');
+    process.exit(0);
+  }
+});
+
+// helper: send message to socket and update bytes
+function sendToSocket(socket, str) {
+  if (!socket || socket.destroyed) return;
+  socket.write(str + '\n');
+  const id = clientIdForSocket(socket);
+  if (clients[id]) {
+    clients[id].bytesOut += Buffer.byteLength(str + '\n');
+    totalBytesOut += Buffer.byteLength(str + '\n');
+  }
+}
+
+// handle queued sockets when slot lëshohet
+function tryProcessQueue() {
+  while (Object.keys(clients).length < CONNECTION_LIMIT && queue.length > 0) {
+    const s = queue.shift();
+    acceptConnection(s);
+  }
+}
+
+function acceptConnection(socket) {
+  const id = clientIdForSocket(socket);
+  clients[id] = {
+    socket,
+    ip: socket.remoteAddress,
+    bytesIn: 0,
+    bytesOut: 0,
+    messages: 0,
+    role: 'read', // default role; client can request admin on connect
+    lastActive: Date.now()
+  };
+  sendToSocket(socket, 'WELCOME Please send "HELLO <name> <role>" e.g. HELLO Erisa admin');
+  writeLog(`[${new Date().toISOString()}] CONNECT ${id}`);
+  console.log(`Accepted: ${id}. Active: ${Object.keys(clients).length}`);
+  setupSocketHandlers(socket);
+  updateStatsFile();
+}
+
+const server = net.createServer((socket) => {
+  // New connection arrives
+  const id = clientIdForSocket(socket);
+  console.log('Incoming connection from', id);
+
+  if (Object.keys(clients).length >= CONNECTION_LIMIT) {
+    // put in queue or refuse
+    queue.push(socket);
+    sendToSocket(socket, 'BUSY Server busy - you are in queue. Wait or try later.');
+    console.log('Queued connection', id, 'Queue length', queue.length);
+    return;
+  } else {
+    acceptConnection(socket);
+  }
+});
+
+function setupSocketHandlers(socket) {
+  const id = clientIdForSocket(socket);
+
+  // timeout for inactivity
+  socket.setTimeout(INACTIVITY_MS);
+  socket.on('timeout', ()=> {
+    writeLog(`[${new Date().toISOString()}] TIMEOUT ${id}`);
+    sendToSocket(socket, 'TIMEOUT You were inactive. Closing connection.');
+    socket.end();
+  });
+
+  socket.on('data', (buf) => {
+    const now = Date.now();
+    const s = clients[id];
+    if (!s) return; // maybe already closed
+    s.lastActive = now;
+    s.bytesIn += buf.length;
+    totalBytesIn += buf.length;
+    let text = buf.toString().trim();
+    s.messages++;
+    writeLog(`[${new Date().toISOString()}] FROM ${id}: ${text}`);
+    // messages can contain multiple lines; handle only first command per data chunk for simplicity
+    handleClientCommand(socket, text);
+    updateStatsFile();
+  });
+
+  socket.on('close', ()=> {
+    const has = clients[id];
+    if (has) {
+      writeLog(`[${new Date().toISOString()}] DISCONNECT ${id}`);
+      delete clients[id];
+      console.log(`Disconnected ${id}. Active: ${Object.keys(clients).length}`);
+    } else {
+      console.log(`Queue/closed ${id}`);
+    }
+    tryProcessQueue();
+    updateStatsFile();
+  });
+
+  socket.on('error', (err)=> {
+    writeLog(`[${new Date().toISOString()}] ERROR ${id}: ${err.message}`);
+  });
+}
+
+function handleClientCommand(socket, line) {
+  const id = clientIdForSocket(socket);
+  const client = clients[id];
+  if (!client) { sendToSocket(socket, 'ERROR unknown client'); return; }
+
+  // Basic priority: respond faster to admin
+  const respond = (msg) => {
+    if (client.role === 'admin') {
+      sendToSocket(socket, msg);
+    } else {
+      // simulate slight delay for read-only users (to give admin faster responses)
+      setTimeout(()=> sendToSocket(socket, msg), 200);
+    }
+  };
+
+  const parts = line.split(' ');
+  const cmd = parts[0].toUpperCase();
+
+  // HELLO <name> <role>
+  if (cmd === 'HELLO') {
+    const name = parts[1] || 'Anon';
+    const role = (parts[2] || 'read').toLowerCase();
+    if (role === 'admin') {
+      client.role = 'admin';
+      respond(`OK Hello ${name}. You are set as ADMIN.`);
+    } else {
+      client.role = 'read';
+      respond(`OK Hello ${name}. You are set as READ-only.`);
+    }
+    updateStatsFile();
+    return;
+  }
+
+  // SIMPLE CHAT
+  if (cmd === 'MSG') {
+    const msg = line.slice(4);
+    writeLog(`[CHAT] ${id}: ${msg}`);
+    respond('MSG_RECEIVED');
+    return;
+  }
+
+  // ADMIN COMMANDS (require role admin)
+  if (cmd === '/LIST' || cmd === 'LIST') {
+    // list files in files dir
+    fs.readdir(FILES_DIR, (err, files) => {
+      if (err) return respond('ERROR reading files');
+      respond('FILES ' + files.join(', '));
+    });
+    return;
+  }
+
+  if (cmd === '/READ' || cmd === 'READ') {
+    const filename = parts[1];
+    if (!filename) return respond('USAGE: READ <filename>');
+    const p = path.join(FILES_DIR, path.basename(filename));
+    fs.readFile(p, 'utf8', (err, data) => {
+      if (err) return respond('ERROR reading file');
+      // send as base64 if binary; here as utf8 text
+      respond(`FILEDATA ${filename} ${Buffer.from(data,'utf8').toString('base64')}`);
+    });
+    return;
+  }
+
+  if (cmd === '/UPLOAD' || cmd === 'UPLOAD') {
+    // Protocol: client sends "UPLOAD filename <base64data>"
+    const filename = parts[1];
+    const base64 = parts.slice(2).join(' ');
+    if (!filename || !base64) return respond('USAGE: UPLOAD <filename> <base64data>');
+    const p = path.join(FILES_DIR, path.basename(filename));
+    fs.writeFile(p, Buffer.from(base64,'base64'), (err)=>{
+      if (err) return respond('ERROR writing file');
+      respond('UPLOAD_OK ' + filename);
+      updateStatsFile();
+    });
+    return;
+  }
+
+  if (cmd === '/DOWNLOAD' || cmd === 'DOWNLOAD') {
+    const filename = parts[1];
+    if (!filename) return respond('USAGE: DOWNLOAD <filename>');
+    const p = path.join(FILES_DIR, path.basename(filename));
+    fs.readFile(p, (err, data)=>{
+      if (err) return respond('ERROR file not found');
+      const b64 = data.toString('base64');
+      respond(`DOWNLOAD ${filename} ${b64}`);
+    });
+    return;
+  }
+
+  if (cmd === '/DELETE' || cmd === 'DELETE') {
+    if (client.role !== 'admin') return respond('ERROR permission denied');
+    const filename = parts[1];
+    if (!filename) return respond('USAGE: DELETE <filename>');
+    const p = path.join(FILES_DIR, path.basename(filename));
+    fs.unlink(p, (err)=>{
+      if (err) return respond('ERROR deleting file');
+      respond('DELETE_OK ' + filename);
+      updateStatsFile();
+    });
+    return;
+  }
+
+  if (cmd === '/SEARCH' || cmd === 'SEARCH') {
+    const keyword = parts[1];
+    if (!keyword) return respond('USAGE: SEARCH <keyword>');
+    fs.readdir(FILES_DIR, (err, files)=>{
+      if (err) return respond('ERROR reading files');
+      const matched = files.filter(f => f.includes(keyword));
+      respond('SEARCH_RESULTS ' + matched.join(','));
+    });
+    return;
+  }
+
+  if (cmd === '/INFO' || cmd === 'INFO') {
+    const filename = parts[1];
+    if (!filename) return respond('USAGE: INFO <filename>');
+    const p = path.join(FILES_DIR, path.basename(filename));
+    fs.stat(p, (err, st)=>{
+      if (err) return respond('ERROR file not found');
+      respond(`INFO ${filename} size=${st.size} created=${st.birthtime.toISOString()} modified=${st.mtime.toISOString()}`);
+    });
+    return;
+  }
+
+  // ADMIN-level control: STATS request from client
+  if (cmd === '/SERVERSTATS') {
+    respond(fs.readFileSync(STATS_FILE,'utf8'));
+    return;
+  }
+
+  // Unknown
+  respond('ERROR unknown command');
+}
+
+// periodic stats update
+setInterval(updateStatsFile, 10 * 1000); // çdo 10s
+
 server.listen(PORT, HOST, () => {
-  console.log(`🚀 Server running on ${HOST}:${PORT}`);
+  console.log(`Server listening on ${HOST}:${PORT}`);
+  writeLog(`[${new Date().toISOString()}] SERVER START ${HOST}:${PORT}`);
+  updateStatsFile();
 });
